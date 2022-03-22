@@ -12,18 +12,19 @@ from model import model_conv
 import torch.utils.data as data
 import torchvision.transforms
 
-model_dict = {}
+model_dict = {"model_conv":model_conv}
 
 def create_model(model_name, model_hparams):
     if model_name in model_dict:
+        if model_hparams==None:
+            return model_dict[model_name]()
         return model_dict[model_name](**model_hparams)
     else:
         assert False, f"Unknown model name \"{model_name}\". Available models are: {str(model_dict.keys())}"
 
 
-
 class lighitngModule(pl.LightningModule):
-    def __init__(self, model, optimizer_name, lr, weigh_decay):
+    def __init__(self, model_name,model_hparams, optimizer_name="Adam",**kwargs):
         """
         Inputs:
             model_name - Name of the model/CNN to run. Used for creating the model (see function below)
@@ -33,11 +34,10 @@ class lighitngModule(pl.LightningModule):
         """
         super().__init__()
         # Exports the hyperparameters to a YAML file, and create "self.hparams" namespace
+        self.save_hyperparameters()
         self.optimizer_name = optimizer_name
-        self.lr = lr
-        self.weight_decay = weigh_decay
         # Create model
-        self.model = model
+        self.model = create_model(model_name,model_hparams)
         # Create loss module
         self.loss_module = nn.CrossEntropyLoss()
         # Example input for visualizing the graph in Tensorboard
@@ -49,19 +49,16 @@ class lighitngModule(pl.LightningModule):
 
     def configure_optimizers(self):
         # We will support Adam or SGD as optimizers.
-        if self.optimizer_name == "Adam":
+        if self.hparams.optimizer_name == "Adam":
             # AdamW is Adam with a correct implementation of weight decay (see here for details: https://arxiv.org/pdf/1711.05101.pdf)
-            optimizer = optim.AdamW(
-                self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-        elif self.hparams.optimizer_name == "SGD":
-            optimizer = optim.SGD(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
+            optimizer = optim.Adam(
+                self.parameters(), lr=self.hparams.lr)
+        elif self.optimizer_name == "SGD":
+            optimizer = optim.SGD(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
         else:
             assert False, f"Unknown optimizer: \"{self.hparams.optimizer_name}\""
 
-        # We will reduce the learning rate by 0.1 after 100 and 150 epochs
-        scheduler = optim.lr_scheduler.MultiStepLR(
-            optimizer, milestones=[100, 150], gamma=0.1)
-        return [optimizer], [scheduler]
+        return [optimizer]
 
     def training_step(self, batch, batch_idx):
         # "batch" is the output of the training data loader.
@@ -90,20 +87,20 @@ class lighitngModule(pl.LightningModule):
         self.log('test_acc', acc)
 
 
-def train_model(model_name, train_loader, test_loader,val_loader, lr=None, weight_decay=None, save_name=None, device=None, CHECKPOINT_PATH=None):
+def train_model(model_name, train_loader, test_loader,val_loader, save_name=None, device=None, CHECKPOINT_PATH=None,**kwargs):
     """
     Inputs:
         model_name - Name of the model you want to run. Is used to look up the class in "model_dict"
         save_name (optional) - If specified, this name will be used for creating the checkpoint and logging directory.
     """
     if save_name is None:
-        save_name = "model_1"
+        save_name = "model_conv"
 
     # Create a PyTorch Lightning trainer with the generation callback
     trainer = pl.Trainer(default_root_dir=os.path.join(CHECKPOINT_PATH, save_name),                          # Where to save models
                          gpus=1 if str(device)=="cuda:0" else 0,                                             # We run on a single GPU (if possible)
-                         max_epochs=180,                                                                     # How many epochs to train for if no patience is set
-                         callbacks=[ModelCheckpoint(save_weights_only=True, mode="max", monitor="val_acc"),  # Save the best checkpoint based on the maximum val_acc recorded. Saves only weights and not optimizer
+                         max_epochs=args.epochs,                                                                     # How many epochs to train for if no patience is set
+                         callbacks=[ModelCheckpoint(save_weights_only=True,filename="model_conv_{epoch:02d}_{val_loss:2f}", mode="max", monitor="val_acc",dirpath=CHECKPOINT_PATH),  # Save the best checkpoint based on the maximum val_acc recorded. Saves only weights and not optimizer
                                     LearningRateMonitor("epoch")],                                           # Log learning rate every epoch
                          progress_bar_refresh_rate=1)                                                        # In case your notebook crashes due to the progress bar, consider increasing the refresh rate
     trainer.logger._log_graph = True         # If True, we plot the computation graph in tensorboard
@@ -116,8 +113,8 @@ def train_model(model_name, train_loader, test_loader,val_loader, lr=None, weigh
         model = lighitngModule.load_from_checkpoint(pretrained_filename) # Automatically loads the model with the saved hyperparameters
     else:
         pl.seed_everything(42) # To be reproducable
-        model = lighitngModule(model_name, optimizer_name="Adam",lr=lr,weigh_decay=weight_decay)
-        trainer.fit(model, train_loader, val_loader)
+        model = lighitngModule(model_name, model_hparams=None, optimizer_name="Adam",**kwargs)
+        trainer.fit(model, train_loader)
         model = lighitngModule.load_from_checkpoint(trainer.checkpoint_callback.best_model_path) # Load best checkpoint after training
 
     # Test best model on validation and test set
@@ -146,19 +143,10 @@ def main(args, device):
     # Creating PT data samplers and loaders:
     train_sampler = SubsetRandomSampler(train_indices)
     valid_sampler = SubsetRandomSampler(val_indices)
-
-    train_loader = torch.utils.data.DataLoader(germanDataTrain, batch_size=32,
-                                               sampler=train_sampler)
-    validation_loader = torch.utils.data.DataLoader(germanDataTrain, batch_size=32,
-                                                    sampler=valid_sampler)
-    # train_data = data.DataLoader(germanDataTrain,batch_size=32,shuffle=True)
-    # train_len = 0.7*len(train_data)
-    # val_len = 0.3*len(train_data)
-    # print(int(val_len))
-    # train_data, val_data = data.random_split(train_data,[train_len,val_len])
-    test_data = data.DataLoader(germanDataTest, batch_size=32)
-    model = model_conv()
-    model_1, model_1_results = train_model(model_name=model,train_loader=train_loader,val_loader=validation_loader,test_loader=test_data,device=device,lr=args.lr,weight_decay=1e-3, CHECKPOINT_PATH="~/german_traffic/checkpoints")
+    train_loader = torch.utils.data.DataLoader(germanDataTrain, batch_size=args.batch,sampler=train_sampler)
+    validation_loader = torch.utils.data.DataLoader(germanDataTrain, batch_size=args.batch,sampler=valid_sampler)
+    test_data = data.DataLoader(germanDataTest, batch_size=args.batch)
+    model_1, model_1_results = train_model(model_name="model_conv",train_loader=train_loader,val_loader=validation_loader,test_loader=test_data,device=device,lr=args.lr,weight_decay=1e-3, CHECKPOINT_PATH="~/german_traffic/checkpoints")
 
 if __name__=="__main__":
     parser = ArgumentParser()
@@ -168,6 +156,7 @@ if __name__=="__main__":
     parser.add_argument("--CHECKPOINT_PATH", default="/home/bhargav/rPPG_Deeplearning/models/")
     parser.add_argument("--dataset",default="cohface")
     parser.add_argument("--datase_path", default="/home/bhargav/rPPG_Deeplearning/src/data/")
+    parser.add_argument("--batch", 8)
     args = parser.parse_args()
     device = torch.device("cuda:0") if torch.cuda.is_available() else torch.device("cpu")
     main(args, device)
